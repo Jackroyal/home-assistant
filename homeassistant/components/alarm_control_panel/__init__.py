@@ -1,233 +1,253 @@
-"""
-Component to interface with an alarm control panel.
+"""Component to interface with an alarm control panel."""
 
-For more details about this platform, please refer to the documentation at
-https://home-assistant.io/components/alarm_control_panel/
-"""
-import asyncio
+from __future__ import annotations
+
 from datetime import timedelta
+from functools import cached_property, partial
 import logging
-import os
+from typing import Any, Final, final
 
 import voluptuous as vol
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
-    ATTR_CODE, ATTR_CODE_FORMAT, ATTR_ENTITY_ID, SERVICE_ALARM_TRIGGER,
-    SERVICE_ALARM_DISARM, SERVICE_ALARM_ARM_HOME, SERVICE_ALARM_ARM_AWAY,
-    SERVICE_ALARM_ARM_NIGHT)
-from homeassistant.config import load_yaml_config_file
-from homeassistant.loader import bind_hass
-from homeassistant.helpers.config_validation import PLATFORM_SCHEMA  # noqa
-import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers.entity import Entity
-from homeassistant.helpers.entity_component import EntityComponent
-
-DOMAIN = 'alarm_control_panel'
-SCAN_INTERVAL = timedelta(seconds=30)
-ATTR_CHANGED_BY = 'changed_by'
-
-ENTITY_ID_FORMAT = DOMAIN + '.{}'
-
-SERVICE_TO_METHOD = {
-    SERVICE_ALARM_DISARM: 'alarm_disarm',
-    SERVICE_ALARM_ARM_HOME: 'alarm_arm_home',
-    SERVICE_ALARM_ARM_AWAY: 'alarm_arm_away',
-    SERVICE_ALARM_ARM_NIGHT: 'alarm_arm_night',
-    SERVICE_ALARM_TRIGGER: 'alarm_trigger'
-}
-
-ATTR_TO_PROPERTY = [
     ATTR_CODE,
-    ATTR_CODE_FORMAT
-]
+    ATTR_CODE_FORMAT,
+    SERVICE_ALARM_ARM_AWAY,
+    SERVICE_ALARM_ARM_CUSTOM_BYPASS,
+    SERVICE_ALARM_ARM_HOME,
+    SERVICE_ALARM_ARM_NIGHT,
+    SERVICE_ALARM_ARM_VACATION,
+    SERVICE_ALARM_DISARM,
+    SERVICE_ALARM_TRIGGER,
+)
+from homeassistant.core import HomeAssistant
+import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.config_validation import make_entity_service_schema
+from homeassistant.helpers.deprecation import (
+    all_with_deprecated_constants,
+    check_if_deprecated_constant,
+    dir_with_deprecated_constants,
+)
+from homeassistant.helpers.entity import Entity, EntityDescription
+from homeassistant.helpers.entity_component import EntityComponent
+from homeassistant.helpers.typing import ConfigType
 
-ALARM_SERVICE_SCHEMA = vol.Schema({
-    vol.Optional(ATTR_ENTITY_ID): cv.entity_ids,
-    vol.Optional(ATTR_CODE): cv.string,
-})
+from . import group as group_pre_import  # noqa: F401
+from .const import (  # noqa: F401
+    _DEPRECATED_FORMAT_NUMBER,
+    _DEPRECATED_FORMAT_TEXT,
+    _DEPRECATED_SUPPORT_ALARM_ARM_AWAY,
+    _DEPRECATED_SUPPORT_ALARM_ARM_CUSTOM_BYPASS,
+    _DEPRECATED_SUPPORT_ALARM_ARM_HOME,
+    _DEPRECATED_SUPPORT_ALARM_ARM_NIGHT,
+    _DEPRECATED_SUPPORT_ALARM_ARM_VACATION,
+    _DEPRECATED_SUPPORT_ALARM_TRIGGER,
+    ATTR_CHANGED_BY,
+    ATTR_CODE_ARM_REQUIRED,
+    DOMAIN,
+    AlarmControlPanelEntityFeature,
+    CodeFormat,
+)
 
+_LOGGER: Final = logging.getLogger(__name__)
 
-@bind_hass
-def alarm_disarm(hass, code=None, entity_id=None):
-    """Send the alarm the command for disarm."""
-    data = {}
-    if code:
-        data[ATTR_CODE] = code
-    if entity_id:
-        data[ATTR_ENTITY_ID] = entity_id
+SCAN_INTERVAL: Final = timedelta(seconds=30)
+ENTITY_ID_FORMAT: Final = DOMAIN + ".{}"
 
-    hass.services.call(DOMAIN, SERVICE_ALARM_DISARM, data)
+ALARM_SERVICE_SCHEMA: Final = make_entity_service_schema(
+    {vol.Optional(ATTR_CODE): cv.string}
+)
 
+PLATFORM_SCHEMA: Final = cv.PLATFORM_SCHEMA
+PLATFORM_SCHEMA_BASE: Final = cv.PLATFORM_SCHEMA_BASE
 
-@bind_hass
-def alarm_arm_home(hass, code=None, entity_id=None):
-    """Send the alarm the command for arm home."""
-    data = {}
-    if code:
-        data[ATTR_CODE] = code
-    if entity_id:
-        data[ATTR_ENTITY_ID] = entity_id
-
-    hass.services.call(DOMAIN, SERVICE_ALARM_ARM_HOME, data)
-
-
-@bind_hass
-def alarm_arm_away(hass, code=None, entity_id=None):
-    """Send the alarm the command for arm away."""
-    data = {}
-    if code:
-        data[ATTR_CODE] = code
-    if entity_id:
-        data[ATTR_ENTITY_ID] = entity_id
-
-    hass.services.call(DOMAIN, SERVICE_ALARM_ARM_AWAY, data)
-
-
-@bind_hass
-def alarm_arm_night(hass, code=None, entity_id=None):
-    """Send the alarm the command for arm night."""
-    data = {}
-    if code:
-        data[ATTR_CODE] = code
-    if entity_id:
-        data[ATTR_ENTITY_ID] = entity_id
-
-    hass.services.call(DOMAIN, SERVICE_ALARM_ARM_NIGHT, data)
+# mypy: disallow-any-generics
 
 
-@bind_hass
-def alarm_trigger(hass, code=None, entity_id=None):
-    """Send the alarm the command for trigger."""
-    data = {}
-    if code:
-        data[ATTR_CODE] = code
-    if entity_id:
-        data[ATTR_ENTITY_ID] = entity_id
-
-    hass.services.call(DOMAIN, SERVICE_ALARM_TRIGGER, data)
-
-
-@asyncio.coroutine
-def async_setup(hass, config):
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Track states and offer events for sensors."""
-    component = EntityComponent(
-        logging.getLogger(__name__), DOMAIN, hass, SCAN_INTERVAL)
+    component = hass.data[DOMAIN] = EntityComponent[AlarmControlPanelEntity](
+        _LOGGER, DOMAIN, hass, SCAN_INTERVAL
+    )
 
-    yield from component.async_setup(config)
+    await component.async_setup(config)
 
-    @asyncio.coroutine
-    def async_alarm_service_handler(service):
-        """Map services to methods on Alarm."""
-        target_alarms = component.async_extract_from_service(service)
-
-        code = service.data.get(ATTR_CODE)
-
-        method = "async_{}".format(SERVICE_TO_METHOD[service.service])
-
-        for alarm in target_alarms:
-            yield from getattr(alarm, method)(code)
-
-        update_tasks = []
-        for alarm in target_alarms:
-            if not alarm.should_poll:
-                continue
-
-            update_coro = hass.async_add_job(
-                alarm.async_update_ha_state(True))
-            if hasattr(alarm, 'async_update'):
-                update_tasks.append(update_coro)
-            else:
-                yield from update_coro
-
-        if update_tasks:
-            yield from asyncio.wait(update_tasks, loop=hass.loop)
-
-    descriptions = yield from hass.async_add_job(
-        load_yaml_config_file, os.path.join(
-            os.path.dirname(__file__), 'services.yaml'))
-
-    for service in SERVICE_TO_METHOD:
-        hass.services.async_register(
-            DOMAIN, service, async_alarm_service_handler,
-            descriptions.get(service), schema=ALARM_SERVICE_SCHEMA)
+    component.async_register_entity_service(
+        SERVICE_ALARM_DISARM, ALARM_SERVICE_SCHEMA, "async_alarm_disarm"
+    )
+    component.async_register_entity_service(
+        SERVICE_ALARM_ARM_HOME,
+        ALARM_SERVICE_SCHEMA,
+        "async_alarm_arm_home",
+        [AlarmControlPanelEntityFeature.ARM_HOME],
+    )
+    component.async_register_entity_service(
+        SERVICE_ALARM_ARM_AWAY,
+        ALARM_SERVICE_SCHEMA,
+        "async_alarm_arm_away",
+        [AlarmControlPanelEntityFeature.ARM_AWAY],
+    )
+    component.async_register_entity_service(
+        SERVICE_ALARM_ARM_NIGHT,
+        ALARM_SERVICE_SCHEMA,
+        "async_alarm_arm_night",
+        [AlarmControlPanelEntityFeature.ARM_NIGHT],
+    )
+    component.async_register_entity_service(
+        SERVICE_ALARM_ARM_VACATION,
+        ALARM_SERVICE_SCHEMA,
+        "async_alarm_arm_vacation",
+        [AlarmControlPanelEntityFeature.ARM_VACATION],
+    )
+    component.async_register_entity_service(
+        SERVICE_ALARM_ARM_CUSTOM_BYPASS,
+        ALARM_SERVICE_SCHEMA,
+        "async_alarm_arm_custom_bypass",
+        [AlarmControlPanelEntityFeature.ARM_CUSTOM_BYPASS],
+    )
+    component.async_register_entity_service(
+        SERVICE_ALARM_TRIGGER,
+        ALARM_SERVICE_SCHEMA,
+        "async_alarm_trigger",
+        [AlarmControlPanelEntityFeature.TRIGGER],
+    )
 
     return True
 
 
-# pylint: disable=no-self-use
-class AlarmControlPanel(Entity):
-    """An abstract class for alarm control devices."""
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up a config entry."""
+    component: EntityComponent[AlarmControlPanelEntity] = hass.data[DOMAIN]
+    return await component.async_setup_entry(entry)
 
-    @property
-    def code_format(self):
-        """Regex for code format or None if no code is required."""
-        return None
 
-    @property
-    def changed_by(self):
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload a config entry."""
+    component: EntityComponent[AlarmControlPanelEntity] = hass.data[DOMAIN]
+    return await component.async_unload_entry(entry)
+
+
+class AlarmControlPanelEntityDescription(EntityDescription, frozen_or_thawed=True):
+    """A class that describes alarm control panel entities."""
+
+
+CACHED_PROPERTIES_WITH_ATTR_ = {
+    "code_format",
+    "changed_by",
+    "code_arm_required",
+    "supported_features",
+}
+
+
+class AlarmControlPanelEntity(Entity, cached_properties=CACHED_PROPERTIES_WITH_ATTR_):
+    """An abstract class for alarm control entities."""
+
+    entity_description: AlarmControlPanelEntityDescription
+    _attr_changed_by: str | None = None
+    _attr_code_arm_required: bool = True
+    _attr_code_format: CodeFormat | None = None
+    _attr_supported_features: AlarmControlPanelEntityFeature = (
+        AlarmControlPanelEntityFeature(0)
+    )
+
+    @cached_property
+    def code_format(self) -> CodeFormat | None:
+        """Code format or None if no code is required."""
+        return self._attr_code_format
+
+    @cached_property
+    def changed_by(self) -> str | None:
         """Last change triggered by."""
-        return None
+        return self._attr_changed_by
 
-    def alarm_disarm(self, code=None):
+    @cached_property
+    def code_arm_required(self) -> bool:
+        """Whether the code is required for arm actions."""
+        return self._attr_code_arm_required
+
+    def alarm_disarm(self, code: str | None = None) -> None:
         """Send disarm command."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
-    def async_alarm_disarm(self, code=None):
-        """Send disarm command.
+    async def async_alarm_disarm(self, code: str | None = None) -> None:
+        """Send disarm command."""
+        await self.hass.async_add_executor_job(self.alarm_disarm, code)
 
-        This method must be run in the event loop and returns a coroutine.
-        """
-        return self.hass.async_add_job(self.alarm_disarm, code)
-
-    def alarm_arm_home(self, code=None):
+    def alarm_arm_home(self, code: str | None = None) -> None:
         """Send arm home command."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
-    def async_alarm_arm_home(self, code=None):
-        """Send arm home command.
+    async def async_alarm_arm_home(self, code: str | None = None) -> None:
+        """Send arm home command."""
+        await self.hass.async_add_executor_job(self.alarm_arm_home, code)
 
-        This method must be run in the event loop and returns a coroutine.
-        """
-        return self.hass.async_add_job(self.alarm_arm_home, code)
-
-    def alarm_arm_away(self, code=None):
+    def alarm_arm_away(self, code: str | None = None) -> None:
         """Send arm away command."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
-    def async_alarm_arm_away(self, code=None):
-        """Send arm away command.
+    async def async_alarm_arm_away(self, code: str | None = None) -> None:
+        """Send arm away command."""
+        await self.hass.async_add_executor_job(self.alarm_arm_away, code)
 
-        This method must be run in the event loop and returns a coroutine.
-        """
-        return self.hass.async_add_job(self.alarm_arm_away, code)
-
-    def alarm_arm_night(self, code=None):
+    def alarm_arm_night(self, code: str | None = None) -> None:
         """Send arm night command."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
-    def async_alarm_arm_night(self, code=None):
-        """Send arm night command.
+    async def async_alarm_arm_night(self, code: str | None = None) -> None:
+        """Send arm night command."""
+        await self.hass.async_add_executor_job(self.alarm_arm_night, code)
 
-        This method must be run in the event loop and returns a coroutine.
-        """
-        return self.hass.async_add_job(self.alarm_arm_night, code)
+    def alarm_arm_vacation(self, code: str | None = None) -> None:
+        """Send arm vacation command."""
+        raise NotImplementedError
 
-    def alarm_trigger(self, code=None):
+    async def async_alarm_arm_vacation(self, code: str | None = None) -> None:
+        """Send arm vacation command."""
+        await self.hass.async_add_executor_job(self.alarm_arm_vacation, code)
+
+    def alarm_trigger(self, code: str | None = None) -> None:
         """Send alarm trigger command."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
-    def async_alarm_trigger(self, code=None):
-        """Send alarm trigger command.
+    async def async_alarm_trigger(self, code: str | None = None) -> None:
+        """Send alarm trigger command."""
+        await self.hass.async_add_executor_job(self.alarm_trigger, code)
 
-        This method must be run in the event loop and returns a coroutine.
-        """
-        return self.hass.async_add_job(self.alarm_trigger, code)
+    def alarm_arm_custom_bypass(self, code: str | None = None) -> None:
+        """Send arm custom bypass command."""
+        raise NotImplementedError
 
+    async def async_alarm_arm_custom_bypass(self, code: str | None = None) -> None:
+        """Send arm custom bypass command."""
+        await self.hass.async_add_executor_job(self.alarm_arm_custom_bypass, code)
+
+    @cached_property
+    def supported_features(self) -> AlarmControlPanelEntityFeature:
+        """Return the list of supported features."""
+        features = self._attr_supported_features
+        if type(features) is int:  # noqa: E721
+            new_features = AlarmControlPanelEntityFeature(features)
+            self._report_deprecated_supported_features_values(new_features)
+            return new_features
+        return features
+
+    @final
     @property
-    def state_attributes(self):
+    def state_attributes(self) -> dict[str, Any] | None:
         """Return the state attributes."""
-        state_attr = {
+        return {
             ATTR_CODE_FORMAT: self.code_format,
-            ATTR_CHANGED_BY: self.changed_by
+            ATTR_CHANGED_BY: self.changed_by,
+            ATTR_CODE_ARM_REQUIRED: self.code_arm_required,
         }
-        return state_attr
+
+
+# As we import constants of the const module here, we need to add the following
+# functions to check for deprecated constants again
+# These can be removed if no deprecated constant are in this module anymore
+__getattr__ = partial(check_if_deprecated_constant, module_globals=globals())
+__dir__ = partial(
+    dir_with_deprecated_constants, module_globals_keys=[*globals().keys()]
+)
+__all__ = all_with_deprecated_constants(globals())

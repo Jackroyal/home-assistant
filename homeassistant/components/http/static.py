@@ -1,84 +1,83 @@
 """Static file handling for HTTP component."""
-import asyncio
-import re
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+import mimetypes
+from pathlib import Path
+from typing import Final
 
 from aiohttp import hdrs
-from aiohttp.web import FileResponse
-from aiohttp.web_exceptions import HTTPNotFound
+from aiohttp.web import FileResponse, Request, StreamResponse
+from aiohttp.web_exceptions import HTTPForbidden, HTTPNotFound
 from aiohttp.web_urldispatcher import StaticResource
-from yarl import unquote
+from lru import LRU
 
-from .const import KEY_DEVELOPMENT
+from .const import KEY_HASS
 
-_FINGERPRINT = re.compile(r'^(.+)-[a-z0-9]{32}\.(\w+)$', re.IGNORECASE)
+CACHE_TIME: Final = 31 * 86400  # = 1 month
+CACHE_HEADER = f"public, max-age={CACHE_TIME}"
+CACHE_HEADERS: Mapping[str, str] = {hdrs.CACHE_CONTROL: CACHE_HEADER}
+PATH_CACHE: LRU[tuple[str, Path], tuple[Path | None, str | None]] = LRU(512)
+
+
+def _get_file_path(rel_url: str, directory: Path) -> Path | None:
+    """Return the path to file on disk or None."""
+    filename = Path(rel_url)
+    if filename.anchor:
+        # rel_url is an absolute name like
+        # /static/\\machine_name\c$ or /static/D:\path
+        # where the static dir is totally different
+        raise HTTPForbidden
+    filepath: Path = directory.joinpath(filename).resolve()
+    filepath.relative_to(directory)
+    # on opening a dir, load its contents if allowed
+    if filepath.is_dir():
+        return None
+    if filepath.is_file():
+        return filepath
+    raise FileNotFoundError
 
 
 class CachingStaticResource(StaticResource):
     """Static Resource handler that will add cache headers."""
 
-    @asyncio.coroutine
-    def _handle(self, request):
-        filename = unquote(request.match_info['filename'])
-        try:
-            # PyLint is wrong about resolve not being a member.
-            # pylint: disable=no-member
-            filepath = self._directory.joinpath(filename).resolve()
-            if not self._follow_symlinks:
-                filepath.relative_to(self._directory)
-        except (ValueError, FileNotFoundError) as error:
-            # relatively safe
-            raise HTTPNotFound() from error
-        except Exception as error:
-            # perm error or other kind!
-            request.app.logger.exception(error)
-            raise HTTPNotFound() from error
+    async def _handle(self, request: Request) -> StreamResponse:
+        """Return requested file from disk as a FileResponse."""
+        rel_url = request.match_info["filename"]
+        key = (rel_url, self._directory)
+        if (filepath_content_type := PATH_CACHE.get(key)) is None:
+            hass = request.app[KEY_HASS]
+            try:
+                filepath = await hass.async_add_executor_job(_get_file_path, *key)
+            except (ValueError, FileNotFoundError) as error:
+                # relatively safe
+                raise HTTPNotFound from error
+            except HTTPForbidden:
+                # forbidden
+                raise
+            except Exception as error:
+                # perm error or other kind!
+                request.app.logger.exception("Unexpected exception")
+                raise HTTPNotFound from error
 
-        if filepath.is_dir():
-            return (yield from super()._handle(request))
-        elif filepath.is_file():
-            return CachingFileResponse(filepath, chunk_size=self._chunk_size)
+            content_type: str | None = None
+            if filepath is not None:
+                content_type = (mimetypes.guess_type(rel_url))[
+                    0
+                ] or "application/octet-stream"
+            PATH_CACHE[key] = (filepath, content_type)
         else:
-            raise HTTPNotFound
+            filepath, content_type = filepath_content_type
 
+        if filepath and content_type:
+            return FileResponse(
+                filepath,
+                chunk_size=self._chunk_size,
+                headers={
+                    hdrs.CACHE_CONTROL: CACHE_HEADER,
+                    hdrs.CONTENT_TYPE: content_type,
+                },
+            )
 
-class CachingFileResponse(FileResponse):
-    """FileSender class that caches output if not in dev mode."""
-
-    def __init__(self, *args, **kwargs):
-        """Initialize the hass file sender."""
-        super().__init__(*args, **kwargs)
-
-        orig_sendfile = self._sendfile
-
-        @asyncio.coroutine
-        def sendfile(request, fobj, count):
-            """Sendfile that includes a cache header."""
-            if not request.app[KEY_DEVELOPMENT]:
-                cache_time = 31 * 86400  # = 1 month
-                self.headers[hdrs.CACHE_CONTROL] = "public, max-age={}".format(
-                    cache_time)
-
-            yield from orig_sendfile(request, fobj, count)
-
-        # Overwriting like this because __init__ can change implementation.
-        self._sendfile = sendfile
-
-
-@asyncio.coroutine
-def staticresource_middleware(app, handler):
-    """Middleware to strip out fingerprint from fingerprinted assets."""
-    @asyncio.coroutine
-    def static_middleware_handler(request):
-        """Strip out fingerprints from resource names."""
-        if not request.path.startswith('/static/'):
-            return handler(request)
-
-        fingerprinted = _FINGERPRINT.match(request.match_info['filename'])
-
-        if fingerprinted:
-            request.match_info['filename'] = \
-                '{}.{}'.format(*fingerprinted.groups())
-
-        return handler(request)
-
-    return static_middleware_handler
+        return await super()._handle(request)

@@ -1,85 +1,93 @@
-"""
-Support for vacuum cleaner robots (botvacs).
+"""Support for vacuum cleaner robots (botvacs)."""
 
-For more details about this platform, please refer to the documentation
-https://home-assistant.io/components/vacuum/
-"""
-import asyncio
+from __future__ import annotations
+
+from collections.abc import Mapping
 from datetime import timedelta
-from functools import partial
+from enum import IntFlag
+from functools import cached_property, partial
 import logging
-import os
+from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.components import group
-from homeassistant.config import load_yaml_config_file
-from homeassistant.const import (
-    ATTR_BATTERY_LEVEL, ATTR_COMMAND, ATTR_ENTITY_ID, SERVICE_TOGGLE,
-    SERVICE_TURN_OFF, SERVICE_TURN_ON, STATE_ON)
-from homeassistant.loader import bind_hass
-import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers.config_validation import PLATFORM_SCHEMA  # noqa
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import (  # noqa: F401 # STATE_PAUSED/IDLE are API
+    ATTR_BATTERY_LEVEL,
+    ATTR_COMMAND,
+    SERVICE_TOGGLE,
+    SERVICE_TURN_OFF,
+    SERVICE_TURN_ON,
+    STATE_IDLE,
+    STATE_ON,
+    STATE_PAUSED,
+)
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.config_validation import (  # noqa: F401
+    PLATFORM_SCHEMA,
+    PLATFORM_SCHEMA_BASE,
+    make_entity_service_schema,
+)
+from homeassistant.helpers.entity import Entity, EntityDescription
 from homeassistant.helpers.entity_component import EntityComponent
-from homeassistant.helpers.entity import ToggleEntity
-from homeassistant.util.icon import icon_for_battery_level
+from homeassistant.helpers.icon import icon_for_battery_level
+from homeassistant.helpers.typing import ConfigType
+from homeassistant.loader import bind_hass
+
+from . import group as group_pre_import  # noqa: F401
+from .const import STATE_CLEANING, STATE_DOCKED, STATE_ERROR, STATE_RETURNING
 
 _LOGGER = logging.getLogger(__name__)
 
-DOMAIN = 'vacuum'
-DEPENDENCIES = ['group']
-
+DOMAIN = "vacuum"
+ENTITY_ID_FORMAT = DOMAIN + ".{}"
 SCAN_INTERVAL = timedelta(seconds=20)
 
-GROUP_NAME_ALL_VACUUMS = 'all vacuum cleaners'
-ENTITY_ID_ALL_VACUUMS = group.ENTITY_ID_FORMAT.format('all_vacuum_cleaners')
+ATTR_BATTERY_ICON = "battery_icon"
+ATTR_CLEANED_AREA = "cleaned_area"
+ATTR_FAN_SPEED = "fan_speed"
+ATTR_FAN_SPEED_LIST = "fan_speed_list"
+ATTR_PARAMS = "params"
+ATTR_STATUS = "status"
 
-ATTR_BATTERY_ICON = 'battery_icon'
-ATTR_CLEANED_AREA = 'cleaned_area'
-ATTR_FAN_SPEED = 'fan_speed'
-ATTR_FAN_SPEED_LIST = 'fan_speed_list'
-ATTR_PARAMS = 'params'
-ATTR_STATUS = 'status'
+SERVICE_CLEAN_SPOT = "clean_spot"
+SERVICE_LOCATE = "locate"
+SERVICE_RETURN_TO_BASE = "return_to_base"
+SERVICE_SEND_COMMAND = "send_command"
+SERVICE_SET_FAN_SPEED = "set_fan_speed"
+SERVICE_START_PAUSE = "start_pause"
+SERVICE_START = "start"
+SERVICE_PAUSE = "pause"
+SERVICE_STOP = "stop"
 
-SERVICE_CLEAN_SPOT = 'clean_spot'
-SERVICE_LOCATE = 'locate'
-SERVICE_RETURN_TO_BASE = 'return_to_base'
-SERVICE_SEND_COMMAND = 'send_command'
-SERVICE_SET_FAN_SPEED = 'set_fan_speed'
-SERVICE_START_PAUSE = 'start_pause'
-SERVICE_STOP = 'stop'
 
-VACUUM_SERVICE_SCHEMA = vol.Schema({
-    vol.Optional(ATTR_ENTITY_ID): cv.entity_ids,
-})
+STATES = [STATE_CLEANING, STATE_DOCKED, STATE_RETURNING, STATE_ERROR]
 
-VACUUM_SET_FAN_SPEED_SERVICE_SCHEMA = VACUUM_SERVICE_SCHEMA.extend({
-    vol.Required(ATTR_FAN_SPEED): cv.string,
-})
+DEFAULT_NAME = "Vacuum cleaner robot"
 
-VACUUM_SEND_COMMAND_SERVICE_SCHEMA = VACUUM_SERVICE_SCHEMA.extend({
-    vol.Required(ATTR_COMMAND): cv.string,
-    vol.Optional(ATTR_PARAMS): cv.Dict,
-})
 
-SERVICE_TO_METHOD = {
-    SERVICE_TURN_ON: {'method': 'async_turn_on'},
-    SERVICE_TURN_OFF: {'method': 'async_turn_off'},
-    SERVICE_TOGGLE: {'method': 'async_toggle'},
-    SERVICE_START_PAUSE: {'method': 'async_start_pause'},
-    SERVICE_RETURN_TO_BASE: {'method': 'async_return_to_base'},
-    SERVICE_CLEAN_SPOT: {'method': 'async_clean_spot'},
-    SERVICE_LOCATE: {'method': 'async_locate'},
-    SERVICE_STOP: {'method': 'async_stop'},
-    SERVICE_SET_FAN_SPEED: {'method': 'async_set_fan_speed',
-                            'schema': VACUUM_SET_FAN_SPEED_SERVICE_SCHEMA},
-    SERVICE_SEND_COMMAND: {'method': 'async_send_command',
-                           'schema': VACUUM_SEND_COMMAND_SERVICE_SCHEMA},
-}
+class VacuumEntityFeature(IntFlag):
+    """Supported features of the vacuum entity."""
 
-DEFAULT_NAME = 'Vacuum cleaner robot'
-DEFAULT_ICON = 'mdi:roomba'
+    TURN_ON = 1  # Deprecated, not supported by StateVacuumEntity
+    TURN_OFF = 2  # Deprecated, not supported by StateVacuumEntity
+    PAUSE = 4
+    STOP = 8
+    RETURN_HOME = 16
+    FAN_SPEED = 32
+    BATTERY = 64
+    STATUS = 128  # Deprecated, not supported by StateVacuumEntity
+    SEND_COMMAND = 256
+    LOCATE = 512
+    CLEAN_SPOT = 1024
+    MAP = 2048
+    STATE = 4096  # Must be set by vacuum platforms derived from StateVacuumEntity
+    START = 8192
 
+
+# These SUPPORT_* constants are deprecated as of Home Assistant 2022.5.
+# Please use the VacuumEntityFeature enum instead.
 SUPPORT_TURN_ON = 1
 SUPPORT_TURN_OFF = 2
 SUPPORT_PAUSE = 4
@@ -92,288 +100,290 @@ SUPPORT_SEND_COMMAND = 256
 SUPPORT_LOCATE = 512
 SUPPORT_CLEAN_SPOT = 1024
 SUPPORT_MAP = 2048
+SUPPORT_STATE = 4096
+SUPPORT_START = 8192
+
+# mypy: disallow-any-generics
 
 
 @bind_hass
-def is_on(hass, entity_id=None):
+def is_on(hass: HomeAssistant, entity_id: str) -> bool:
     """Return if the vacuum is on based on the statemachine."""
-    entity_id = entity_id or ENTITY_ID_ALL_VACUUMS
     return hass.states.is_state(entity_id, STATE_ON)
 
 
-@bind_hass
-def turn_on(hass, entity_id=None):
-    """Turn all or specified vacuum on."""
-    data = {ATTR_ENTITY_ID: entity_id} if entity_id else None
-    hass.services.call(DOMAIN, SERVICE_TURN_ON, data)
-
-
-@bind_hass
-def turn_off(hass, entity_id=None):
-    """Turn all or specified vacuum off."""
-    data = {ATTR_ENTITY_ID: entity_id} if entity_id else None
-    hass.services.call(DOMAIN, SERVICE_TURN_OFF, data)
-
-
-@bind_hass
-def toggle(hass, entity_id=None):
-    """Toggle all or specified vacuum."""
-    data = {ATTR_ENTITY_ID: entity_id} if entity_id else None
-    hass.services.call(DOMAIN, SERVICE_TOGGLE, data)
-
-
-@bind_hass
-def locate(hass, entity_id=None):
-    """Locate all or specified vacuum."""
-    data = {ATTR_ENTITY_ID: entity_id} if entity_id else None
-    hass.services.call(DOMAIN, SERVICE_LOCATE, data)
-
-
-@bind_hass
-def clean_spot(hass, entity_id=None):
-    """Tell all or specified vacuum to perform a spot clean-up."""
-    data = {ATTR_ENTITY_ID: entity_id} if entity_id else None
-    hass.services.call(DOMAIN, SERVICE_CLEAN_SPOT, data)
-
-
-@bind_hass
-def return_to_base(hass, entity_id=None):
-    """Tell all or specified vacuum to return to base."""
-    data = {ATTR_ENTITY_ID: entity_id} if entity_id else None
-    hass.services.call(DOMAIN, SERVICE_RETURN_TO_BASE, data)
-
-
-@bind_hass
-def start_pause(hass, entity_id=None):
-    """Tell all or specified vacuum to start or pause the current task."""
-    data = {ATTR_ENTITY_ID: entity_id} if entity_id else None
-    hass.services.call(DOMAIN, SERVICE_START_PAUSE, data)
-
-
-@bind_hass
-def stop(hass, entity_id=None):
-    """Stop all or specified vacuum."""
-    data = {ATTR_ENTITY_ID: entity_id} if entity_id else None
-    hass.services.call(DOMAIN, SERVICE_STOP, data)
-
-
-@bind_hass
-def set_fan_speed(hass, fan_speed, entity_id=None):
-    """Set fan speed for all or specified vacuum."""
-    data = {ATTR_ENTITY_ID: entity_id} if entity_id else {}
-    data[ATTR_FAN_SPEED] = fan_speed
-    hass.services.call(DOMAIN, SERVICE_SET_FAN_SPEED, data)
-
-
-@bind_hass
-def send_command(hass, command, params=None, entity_id=None):
-    """Send command to all or specified vacuum."""
-    data = {ATTR_ENTITY_ID: entity_id} if entity_id else {}
-    data[ATTR_COMMAND] = command
-    if params is not None:
-        data[ATTR_PARAMS] = params
-    hass.services.call(DOMAIN, SERVICE_SEND_COMMAND, data)
-
-
-@asyncio.coroutine
-def async_setup(hass, config):
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the vacuum component."""
-    component = EntityComponent(
-        _LOGGER, DOMAIN, hass, SCAN_INTERVAL, GROUP_NAME_ALL_VACUUMS)
+    component = hass.data[DOMAIN] = EntityComponent[StateVacuumEntity](
+        _LOGGER, DOMAIN, hass, SCAN_INTERVAL
+    )
 
-    yield from component.async_setup(config)
+    await component.async_setup(config)
 
-    descriptions = yield from hass.async_add_job(
-        load_yaml_config_file, os.path.join(
-            os.path.dirname(__file__), 'services.yaml'))
-
-    @asyncio.coroutine
-    def async_handle_vacuum_service(service):
-        """Map services to methods on VacuumDevice."""
-        method = SERVICE_TO_METHOD.get(service.service)
-        target_vacuums = component.async_extract_from_service(service)
-        params = service.data.copy()
-        params.pop(ATTR_ENTITY_ID, None)
-
-        update_tasks = []
-        for vacuum in target_vacuums:
-            yield from getattr(vacuum, method['method'])(**params)
-            if not vacuum.should_poll:
-                continue
-
-            update_coro = hass.async_add_job(
-                vacuum.async_update_ha_state(True))
-            if hasattr(vacuum, 'async_update'):
-                update_tasks.append(update_coro)
-            else:
-                yield from update_coro
-
-        if update_tasks:
-            yield from asyncio.wait(update_tasks, loop=hass.loop)
-
-    for service in SERVICE_TO_METHOD:
-        schema = SERVICE_TO_METHOD[service].get(
-            'schema', VACUUM_SERVICE_SCHEMA)
-        hass.services.async_register(
-            DOMAIN, service, async_handle_vacuum_service,
-            descriptions.get(service), schema=schema)
+    component.async_register_entity_service(
+        SERVICE_START,
+        {},
+        "async_start",
+        [VacuumEntityFeature.START],
+    )
+    component.async_register_entity_service(
+        SERVICE_PAUSE,
+        {},
+        "async_pause",
+        [VacuumEntityFeature.PAUSE],
+    )
+    component.async_register_entity_service(
+        SERVICE_RETURN_TO_BASE,
+        {},
+        "async_return_to_base",
+        [VacuumEntityFeature.RETURN_HOME],
+    )
+    component.async_register_entity_service(
+        SERVICE_CLEAN_SPOT,
+        {},
+        "async_clean_spot",
+        [VacuumEntityFeature.CLEAN_SPOT],
+    )
+    component.async_register_entity_service(
+        SERVICE_LOCATE,
+        {},
+        "async_locate",
+        [VacuumEntityFeature.LOCATE],
+    )
+    component.async_register_entity_service(
+        SERVICE_STOP,
+        {},
+        "async_stop",
+        [VacuumEntityFeature.STOP],
+    )
+    component.async_register_entity_service(
+        SERVICE_SET_FAN_SPEED,
+        {vol.Required(ATTR_FAN_SPEED): cv.string},
+        "async_set_fan_speed",
+        [VacuumEntityFeature.FAN_SPEED],
+    )
+    component.async_register_entity_service(
+        SERVICE_SEND_COMMAND,
+        {
+            vol.Required(ATTR_COMMAND): cv.string,
+            vol.Optional(ATTR_PARAMS): vol.Any(dict, cv.ensure_list),
+        },
+        "async_send_command",
+        [VacuumEntityFeature.SEND_COMMAND],
+    )
 
     return True
 
 
-class VacuumDevice(ToggleEntity):
-    """Representation of a vacuum cleaner robot."""
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up a config entry."""
+    component: EntityComponent[StateVacuumEntity] = hass.data[DOMAIN]
+    return await component.async_setup_entry(entry)
 
-    @property
-    def supported_features(self):
-        """Flag vacuum cleaner features that are supported."""
-        raise NotImplementedError()
 
-    @property
-    def status(self):
-        """Return the status of the vacuum cleaner."""
-        return None
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload a config entry."""
+    component: EntityComponent[StateVacuumEntity] = hass.data[DOMAIN]
+    return await component.async_unload_entry(entry)
 
-    @property
-    def battery_level(self):
+
+class StateVacuumEntityDescription(EntityDescription, frozen_or_thawed=True):
+    """A class that describes vacuum entities."""
+
+
+STATE_VACUUM_CACHED_PROPERTIES_WITH_ATTR_ = {
+    "supported_features",
+    "battery_level",
+    "battery_icon",
+    "fan_speed",
+    "fan_speed_list",
+    "state",
+}
+
+
+class StateVacuumEntity(
+    Entity, cached_properties=STATE_VACUUM_CACHED_PROPERTIES_WITH_ATTR_
+):
+    """Representation of a vacuum cleaner robot that supports states."""
+
+    entity_description: StateVacuumEntityDescription
+
+    _entity_component_unrecorded_attributes = frozenset({ATTR_FAN_SPEED_LIST})
+
+    _attr_battery_icon: str
+    _attr_battery_level: int | None = None
+    _attr_fan_speed: str | None = None
+    _attr_fan_speed_list: list[str]
+    _attr_state: str | None = None
+    _attr_supported_features: VacuumEntityFeature = VacuumEntityFeature(0)
+
+    @cached_property
+    def battery_level(self) -> int | None:
         """Return the battery level of the vacuum cleaner."""
-        return None
+        return self._attr_battery_level
 
     @property
-    def battery_icon(self):
+    def battery_icon(self) -> str:
         """Return the battery icon for the vacuum cleaner."""
-        charging = False
-        if self.status is not None:
-            charging = 'charg' in self.status.lower()
+        charging = bool(self.state == STATE_DOCKED)
+
         return icon_for_battery_level(
-            battery_level=self.battery_level, charging=charging)
+            battery_level=self.battery_level, charging=charging
+        )
 
     @property
-    def fan_speed(self):
-        """Return the fan speed of the vacuum cleaner."""
+    def capability_attributes(self) -> Mapping[str, Any] | None:
+        """Return capability attributes."""
+        if VacuumEntityFeature.FAN_SPEED in self.supported_features_compat:
+            return {ATTR_FAN_SPEED_LIST: self.fan_speed_list}
         return None
 
-    @property
-    def fan_speed_list(self):
+    @cached_property
+    def fan_speed(self) -> str | None:
+        """Return the fan speed of the vacuum cleaner."""
+        return self._attr_fan_speed
+
+    @cached_property
+    def fan_speed_list(self) -> list[str]:
         """Get the list of available fan speed steps of the vacuum cleaner."""
-        raise NotImplementedError()
+        return self._attr_fan_speed_list
 
     @property
-    def state_attributes(self):
+    def state_attributes(self) -> dict[str, Any]:
         """Return the state attributes of the vacuum cleaner."""
-        data = {}
+        data: dict[str, Any] = {}
+        supported_features = self.supported_features_compat
 
-        if self.status is not None:
-            data[ATTR_STATUS] = self.status
-
-        if self.battery_level is not None:
+        if VacuumEntityFeature.BATTERY in supported_features:
             data[ATTR_BATTERY_LEVEL] = self.battery_level
             data[ATTR_BATTERY_ICON] = self.battery_icon
 
-        if self.fan_speed is not None:
+        if VacuumEntityFeature.FAN_SPEED in supported_features:
             data[ATTR_FAN_SPEED] = self.fan_speed
-            data[ATTR_FAN_SPEED_LIST] = self.fan_speed_list
 
         return data
 
-    def turn_on(self, **kwargs):
-        """Turn the vacuum on and start cleaning."""
-        raise NotImplementedError()
+    @cached_property
+    def state(self) -> str | None:
+        """Return the state of the vacuum cleaner."""
+        return self._attr_state
 
-    def async_turn_on(self, **kwargs):
-        """Turn the vacuum on and start cleaning.
+    @cached_property
+    def supported_features(self) -> VacuumEntityFeature:
+        """Flag vacuum cleaner features that are supported."""
+        return self._attr_supported_features
 
-        This method must be run in the event loop and returns a coroutine.
+    @property
+    def supported_features_compat(self) -> VacuumEntityFeature:
+        """Return the supported features as VacuumEntityFeature.
+
+        Remove this compatibility shim in 2025.1 or later.
         """
-        return self.hass.async_add_job(partial(self.turn_on, **kwargs))
+        features = self.supported_features
+        if type(features) is int:  # noqa: E721
+            new_features = VacuumEntityFeature(features)
+            self._report_deprecated_supported_features_values(new_features)
+            return new_features
+        return features
 
-    def turn_off(self, **kwargs):
-        """Turn the vacuum off stopping the cleaning and returning home."""
-        raise NotImplementedError()
-
-    def async_turn_off(self, **kwargs):
-        """Turn the vacuum off stopping the cleaning and returning home.
-
-        This method must be run in the event loop and returns a coroutine.
-        """
-        return self.hass.async_add_job(partial(self.turn_off, **kwargs))
-
-    def return_to_base(self, **kwargs):
-        """Set the vacuum cleaner to return to the dock."""
-        raise NotImplementedError()
-
-    def async_return_to_base(self, **kwargs):
-        """Set the vacuum cleaner to return to the dock.
-
-        This method must be run in the event loop and returns a coroutine.
-        """
-        return self.hass.async_add_job(partial(self.return_to_base, **kwargs))
-
-    def stop(self, **kwargs):
+    def stop(self, **kwargs: Any) -> None:
         """Stop the vacuum cleaner."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
-    def async_stop(self, **kwargs):
+    async def async_stop(self, **kwargs: Any) -> None:
         """Stop the vacuum cleaner.
 
-        This method must be run in the event loop and returns a coroutine.
+        This method must be run in the event loop.
         """
-        return self.hass.async_add_job(partial(self.stop, **kwargs))
+        await self.hass.async_add_executor_job(partial(self.stop, **kwargs))
 
-    def clean_spot(self, **kwargs):
+    def return_to_base(self, **kwargs: Any) -> None:
+        """Set the vacuum cleaner to return to the dock."""
+        raise NotImplementedError
+
+    async def async_return_to_base(self, **kwargs: Any) -> None:
+        """Set the vacuum cleaner to return to the dock.
+
+        This method must be run in the event loop.
+        """
+        await self.hass.async_add_executor_job(partial(self.return_to_base, **kwargs))
+
+    def clean_spot(self, **kwargs: Any) -> None:
         """Perform a spot clean-up."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
-    def async_clean_spot(self, **kwargs):
+    async def async_clean_spot(self, **kwargs: Any) -> None:
         """Perform a spot clean-up.
 
-        This method must be run in the event loop and returns a coroutine.
+        This method must be run in the event loop.
         """
-        return self.hass.async_add_job(partial(self.clean_spot, **kwargs))
+        await self.hass.async_add_executor_job(partial(self.clean_spot, **kwargs))
 
-    def locate(self, **kwargs):
+    def locate(self, **kwargs: Any) -> None:
         """Locate the vacuum cleaner."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
-    def async_locate(self, **kwargs):
+    async def async_locate(self, **kwargs: Any) -> None:
         """Locate the vacuum cleaner.
 
-        This method must be run in the event loop and returns a coroutine.
+        This method must be run in the event loop.
         """
-        return self.hass.async_add_job(partial(self.locate, **kwargs))
+        await self.hass.async_add_executor_job(partial(self.locate, **kwargs))
 
-    def set_fan_speed(self, fan_speed, **kwargs):
+    def set_fan_speed(self, fan_speed: str, **kwargs: Any) -> None:
         """Set fan speed."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
-    def async_set_fan_speed(self, fan_speed, **kwargs):
+    async def async_set_fan_speed(self, fan_speed: str, **kwargs: Any) -> None:
         """Set fan speed.
 
-        This method must be run in the event loop and returns a coroutine.
+        This method must be run in the event loop.
         """
-        return self.hass.async_add_job(
-            partial(self.set_fan_speed, fan_speed, **kwargs))
+        await self.hass.async_add_executor_job(
+            partial(self.set_fan_speed, fan_speed, **kwargs)
+        )
 
-    def start_pause(self, **kwargs):
-        """Start, pause or resume the cleaning task."""
-        raise NotImplementedError()
-
-    def async_start_pause(self, **kwargs):
-        """Start, pause or resume the cleaning task.
-
-        This method must be run in the event loop and returns a coroutine.
-        """
-        return self.hass.async_add_job(
-            partial(self.start_pause, **kwargs))
-
-    def send_command(self, command, params=None, **kwargs):
+    def send_command(
+        self,
+        command: str,
+        params: dict[str, Any] | list[Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
         """Send a command to a vacuum cleaner."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
-    def async_send_command(self, command, params=None, **kwargs):
+    async def async_send_command(
+        self,
+        command: str,
+        params: dict[str, Any] | list[Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
         """Send a command to a vacuum cleaner.
 
-        This method must be run in the event loop and returns a coroutine.
+        This method must be run in the event loop.
         """
-        return self.hass.async_add_job(
-            partial(self.send_command, command, params=params, **kwargs))
+        await self.hass.async_add_executor_job(
+            partial(self.send_command, command, params=params, **kwargs)
+        )
+
+    def start(self) -> None:
+        """Start or resume the cleaning task."""
+        raise NotImplementedError
+
+    async def async_start(self) -> None:
+        """Start or resume the cleaning task.
+
+        This method must be run in the event loop.
+        """
+        await self.hass.async_add_executor_job(self.start)
+
+    def pause(self) -> None:
+        """Pause the cleaning task."""
+        raise NotImplementedError
+
+    async def async_pause(self) -> None:
+        """Pause the cleaning task.
+
+        This method must be run in the event loop.
+        """
+        await self.hass.async_add_executor_job(self.pause)
