@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from datetime import timedelta
 from enum import IntFlag
-from functools import partial
+from functools import cached_property, partial
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import voluptuous as vol
 
@@ -36,16 +35,10 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import bind_hass
 
 from . import group as group_pre_import  # noqa: F401
-from .const import STATE_CLEANING, STATE_DOCKED, STATE_ERROR, STATE_RETURNING
-
-if TYPE_CHECKING:
-    from functools import cached_property
-else:
-    from homeassistant.backports.functools import cached_property
+from .const import DOMAIN, STATE_CLEANING, STATE_DOCKED, STATE_ERROR, STATE_RETURNING
 
 _LOGGER = logging.getLogger(__name__)
 
-DOMAIN = "vacuum"
 ENTITY_ID_FORMAT = DOMAIN + ".{}"
 SCAN_INTERVAL = timedelta(seconds=20)
 
@@ -237,7 +230,7 @@ class StateVacuumEntity(
         )
 
     @property
-    def capability_attributes(self) -> Mapping[str, Any] | None:
+    def capability_attributes(self) -> dict[str, Any] | None:
         """Return capability attributes."""
         if VacuumEntityFeature.FAN_SPEED in self.supported_features_compat:
             return {ATTR_FAN_SPEED_LIST: self.fan_speed_list}
@@ -293,7 +286,7 @@ class StateVacuumEntity(
 
     def stop(self, **kwargs: Any) -> None:
         """Stop the vacuum cleaner."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
     async def async_stop(self, **kwargs: Any) -> None:
         """Stop the vacuum cleaner.
@@ -304,7 +297,7 @@ class StateVacuumEntity(
 
     def return_to_base(self, **kwargs: Any) -> None:
         """Set the vacuum cleaner to return to the dock."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
     async def async_return_to_base(self, **kwargs: Any) -> None:
         """Set the vacuum cleaner to return to the dock.
@@ -315,7 +308,7 @@ class StateVacuumEntity(
 
     def clean_spot(self, **kwargs: Any) -> None:
         """Perform a spot clean-up."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
     async def async_clean_spot(self, **kwargs: Any) -> None:
         """Perform a spot clean-up.
@@ -326,7 +319,7 @@ class StateVacuumEntity(
 
     def locate(self, **kwargs: Any) -> None:
         """Locate the vacuum cleaner."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
     async def async_locate(self, **kwargs: Any) -> None:
         """Locate the vacuum cleaner.
@@ -337,7 +330,7 @@ class StateVacuumEntity(
 
     def set_fan_speed(self, fan_speed: str, **kwargs: Any) -> None:
         """Set fan speed."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
     async def async_set_fan_speed(self, fan_speed: str, **kwargs: Any) -> None:
         """Set fan speed.
@@ -355,7 +348,7 @@ class StateVacuumEntity(
         **kwargs: Any,
     ) -> None:
         """Send a command to a vacuum cleaner."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
     async def async_send_command(
         self,
@@ -373,7 +366,7 @@ class StateVacuumEntity(
 
     def start(self) -> None:
         """Start or resume the cleaning task."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
     async def async_start(self) -> None:
         """Start or resume the cleaning task.
@@ -384,7 +377,7 @@ class StateVacuumEntity(
 
     def pause(self) -> None:
         """Pause the cleaning task."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
     async def async_pause(self) -> None:
         """Pause the cleaning task.
