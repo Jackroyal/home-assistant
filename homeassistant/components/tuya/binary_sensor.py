@@ -17,8 +17,8 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import TuyaConfigEntry
-from .base import TuyaEntity
 from .const import TUYA_DISCOVERY_NEW, DPCode
+from .entity import TuyaEntity
 
 
 @dataclass(frozen=True)
@@ -150,7 +150,7 @@ BINARY_SENSORS: dict[str, tuple[TuyaBinarySensorEntityDescription, ...]] = {
     "hps": (
         TuyaBinarySensorEntityDescription(
             key=DPCode.PRESENCE_STATE,
-            device_class=BinarySensorDeviceClass.MOTION,
+            device_class=BinarySensorDeviceClass.OCCUPANCY,
             on_value="presence",
         ),
     ),
@@ -188,6 +188,10 @@ BINARY_SENSORS: dict[str, tuple[TuyaBinarySensorEntityDescription, ...]] = {
     "mcs": (
         TuyaBinarySensorEntityDescription(
             key=DPCode.DOORCONTACT_STATE,
+            device_class=BinarySensorDeviceClass.DOOR,
+        ),
+        TuyaBinarySensorEntityDescription(
+            key=DPCode.SWITCH,  # Used by non-standard contact sensor implementations
             device_class=BinarySensorDeviceClass.DOOR,
         ),
         TAMPER_BINARY_SENSOR,
